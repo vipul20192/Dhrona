@@ -1,4 +1,4 @@
-"""
+————……—……—…————–—"""
 Chess Coach Dashboard for Zlatan_max
 Auto-fetches chess.com data, runs daily curriculum, tracks progress.
 Deploy on Streamlit Community Cloud (free).
@@ -565,3 +565,202 @@ with col_b:
         st.rerun()
 with col_a:
     st.caption(f"Data auto-cached for 10 minutes. Last load: {datetime.now().strftime('%H:%M:%S')}")
+
+
+# ============================================================================
+# PATTERNS — what's actually going wrong (with board snapshots)
+# ============================================================================
+import re as _re_p
+import statistics as _stats_p
+
+try:
+    import chess as _chess
+    import chess.svg as _chess_svg
+    _CHESS_OK = True
+except Exception:
+    _CHESS_OK = False
+
+
+@st.cache_data(ttl=600)
+def _patterns_recent_games(months_back=2):
+    arch = fetch_archives(USERNAME)
+    out = []
+    for url in (arch[-months_back:] if arch else []):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            r.raise_for_status()
+            out.extend(r.json().get("games", []))
+        except Exception:
+            continue
+    return [g for g in out if g.get("time_class") == "rapid"]
+
+
+def _patterns_analyze(games):
+    me = USERNAME.lower()
+    by_color = {"W": {"n": 0, "wins": 0, "losses": 0},
+                "B": {"n": 0, "wins": 0, "losses": 0}}
+    loss_modes = Counter()
+    loss_lens = []
+    loss_clock_left = []
+    for g in games:
+        is_w = g["white"]["username"].lower() == me
+        my  = g["white"] if is_w else g["black"]
+        c = "W" if is_w else "B"
+        by_color[c]["n"] += 1
+        res = my["result"]
+        if res == "win":
+            by_color[c]["wins"] += 1
+            continue
+        if res in ("agreed", "stalemate", "repetition", "insufficient", "50move", "timevsinsufficient"):
+            continue
+        by_color[c]["losses"] += 1
+        loss_modes[res] += 1
+        pgn = g.get("pgn", "")
+        plies = len(_re_p.findall(r"\d+\.", pgn))
+        if plies:
+            loss_lens.append(plies)
+        clks = _re_p.findall(r"\[%clk (\d+):(\d+):([\d.]+)\]", pgn)
+        my_clks = [int(h)*3600 + int(m)*60 + float(s) for i, (h, m, s) in enumerate(clks) if (is_w and i % 2 == 0) or (not is_w and i % 2 == 1)]
+        if my_clks:
+            loss_clock_left.append(my_clks[-1])
+    return {
+        "by_color": by_color,
+        "loss_modes": loss_modes,
+        "avg_loss_len": round(_stats_p.mean(loss_lens)) if loss_lens else 0,
+        "avg_clock_min": round(_stats_p.mean(loss_clock_left) / 60, 1) if loss_clock_left else 0,
+        "total": len(games),
+    }
+
+
+def _patterns_render_board(fen, arrows=None, flipped=False, size=300):
+    if not _CHESS_OK:
+        st.code(fen)
+        return
+    try:
+        board = _chess.Board(fen)
+    except Exception:
+        st.code(fen)
+        return
+    arr = []
+    for spec in (arrows or []):
+        try:
+            a, b, color = spec
+            arr.append(_chess_svg.Arrow(_chess.parse_square(a), _chess.parse_square(b), color=color))
+        except Exception:
+            continue
+    svg = _chess_svg.board(board, arrows=arr, size=size, flipped=flipped)
+    st.image(svg)
+_PATTERN_LIST = [
+    {
+        "title": "1. The Bxf7+ sacrifice as Black",
+        "why": "In Italian and Four-Knights setups when White has a bishop on c4 and a knight on f3, f7 is a target. If your only defender of f7 is the king, White sacrifices the bishop, drags your king out, then plays Ng5+ winning the queen or mating.",
+        "wrong_fen": "r1bqkb1r/pppp1Bpp/2n2n2/4p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 4",
+        "wrong_caption": "AFTER 4.Bxf7+ - your king has to take, and Ng5+ next wins the queen.",
+        "wrong_arrows": [("c4", "f7", "#cc0000"), ("f3", "g5", "#cc0000")],
+        "right_fen": "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 3",
+        "right_caption": "BEFORE the sac - play Bc5 or Be7 and castle FAST. Once your king is on g8, the sac doesnt work.",
+        "right_arrows": [("f8", "c5", "#1f7a1f"), ("e8", "g8", "#1f7a1f")],
+        "rule": "If a white bishop is on c4 and your king is on e8, treat f7 as on fire. Develop and castle before anything else.",
+    },
+    {
+        "title": "2. The d5 outpost - knight forks on c7 and e7",
+        "why": "After d6 early as Black, the d5 square becomes a permanent home for a white knight. From d5, the knight forks queen and rook on c7 or e7 in one move.",
+        "wrong_fen": "r1bqkb1r/ppp2ppp/2np1n2/4p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R w KQkq - 0 5",
+        "wrong_caption": "You played d6 - the d5 square is yours to lose. White plays Nd5 next, hitting Nf6 and eyeing c7 and e7.",
+        "wrong_arrows": [("c3", "d5", "#cc0000")],
+        "right_fen": "r1bqkb1r/ppp2ppp/2n2n2/3pp3/4P3/2N2N2/PPPP1PPP/R1BQKB1R w KQkq - 0 5",
+        "right_caption": "Better: d5 contests the centre directly. Now your pawn controls d5 - no outpost, no fork.",
+        "right_arrows": [("d7", "d5", "#1f7a1f")],
+        "rule": "Before any developing move, ask: is the d5 (or d4 if you are White) square safe for an enemy knight? If yes, contest it.",
+    },
+    {
+        "title": "3. Moving the defender of a pinned piece",
+        "why": "Several losses come from moving the piece BEHIND a pin, which loses material immediately. Example: bishop on g4 pins your f3 knight to your queen, and you play h3?? - Black takes the knight and your queen falls.",
+        "wrong_fen": "rnb1kb1r/pppp1ppp/5n2/4p3/6q1/5N1P/PPPPPPP1/RNBQKB1R w KQkq - 0 4",
+        "wrong_caption": "You played h3?? - but Bxf3 wins the queen because the bishop on g4 pins the knight.",
+        "wrong_arrows": [("g4", "f3", "#cc0000")],
+        "right_fen": "rnb1kb1r/pppp1ppp/5n2/4p3/6q1/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 4",
+        "right_caption": "Better: develop with Be2 first to break the pin, THEN consider h3.",
+        "right_arrows": [("f1", "e2", "#1f7a1f")],
+        "rule": "When a piece is pinned, ask: what happens if the pinner takes? If you lose material, you cannot move the pinned piece OR its defender.",
+    },
+]
+def _patterns_render_pattern(pat):
+    st.markdown(f"#### {pat['title']}")
+    st.markdown(f"<div style='font-size:14px;color:#3a3a3a;line-height:1.6;margin-bottom:12px;'>{pat['why']}</div>", unsafe_allow_html=True)
+    bcol1, bcol2 = st.columns(2)
+    with bcol1:
+        st.markdown("<div style='font-size:11px;letter-spacing:1.5px;color:#c9302c;text-transform:uppercase;font-weight:600;margin-bottom:6px;'>What goes wrong</div>", unsafe_allow_html=True)
+        _patterns_render_board(pat["wrong_fen"], arrows=pat["wrong_arrows"], flipped=False, size=300)
+        st.markdown(f"<div style='font-size:13px;color:#1a1a1a;line-height:1.55;margin-top:6px;'>{pat['wrong_caption']}</div>", unsafe_allow_html=True)
+    with bcol2:
+        st.markdown("<div style='font-size:11px;letter-spacing:1.5px;color:#4a7c59;text-transform:uppercase;font-weight:600;margin-bottom:6px;'>What to do instead</div>", unsafe_allow_html=True)
+        _patterns_render_board(pat["right_fen"], arrows=pat["right_arrows"], flipped=False, size=300)
+        st.markdown(f"<div style='font-size:13px;color:#1a1a1a;line-height:1.55;margin-top:6px;'>{pat['right_caption']}</div>", unsafe_allow_html=True)
+    st.markdown(f'<div style="background:#eaf3ed;border-left:3px solid #4a7c59;padding:10px 14px;margin:12px 0 24px;"><span style="font-size:10px;letter-spacing:1.5px;color:#4a7c59;text-transform:uppercase;font-weight:600;margin-right:8px;">Rule of thumb</span><span style="font-size:13px;color:#1a1a1a;">{pat["rule"]}</span></div>', unsafe_allow_html=True)
+def _patterns_render_pattern(pat):
+    st.markdown("#### " + pat["title"])
+    st.markdown("<p style=color:#3a3a3a;line-height:1.6;margin-bottom:10px>" + pat["why"] + "</p>", unsafe_allow_html=True)
+    bcol1, bcol2 = st.columns(2)
+    with bcol1:
+        st.markdown("**:red[What goes wrong]**")
+        _patterns_render_board(pat["wrong_fen"], arrows=pat["wrong_arrows"], flipped=False, size=300)
+        st.caption(pat["wrong_caption"])
+    with bcol2:
+        st.markdown("**:green[What to do instead]**")
+        _patterns_render_board(pat["right_fen"], arrows=pat["right_arrows"], flipped=False, size=300)
+        st.caption(pat["right_caption"])
+    st.success("Rule of thumb: " + pat["rule"])
+
+st.markdown("---")
+st.markdown("## Patterns - what is actually going wrong")
+st.caption("Auto-computed from your last 2 months of rapid games on Chess.com. Boards below show the recurring positions to recognise.")
+
+_pgames = _patterns_recent_games(2)
+_p = _patterns_analyze(_pgames) if _pgames else None
+
+if _p is None:
+    st.info("No recent rapid games found yet. Play a few and refresh.")
+else:
+    _w = _p["by_color"]["W"]
+    _b = _p["by_color"]["B"]
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        _wr = (_w["wins"]/max(_w["n"],1))*100
+        stat_card("White win rate", str(int(_wr)) + "%", str(_w["wins"]) + "W / " + str(_w["losses"]) + "L of " + str(_w["n"]), "#4a7c59")
+    with pc2:
+        _br = (_b["wins"]/max(_b["n"],1))*100
+        stat_card("Black win rate", str(int(_br)) + "%", str(_b["wins"]) + "W / " + str(_b["losses"]) + "L of " + str(_b["n"]), "#c9302c")
+    with pc3:
+        stat_card("Avg time left when losing", str(_p["avg_clock_min"]) + " min", "high = missing tactics, not running out of time", "#d4a017")
+
+    st.markdown("### Diagnosis")
+    _diag = []
+    if _b["n"] and (_b["wins"]/_b["n"]) < (_w["wins"]/max(_w["n"], 1)) - 0.10:
+        _diag.append(("Color gap", "Black is dragging your rating. Pick ONE response to 1.e4 and ONE to 1.d4 and stick with them for 28 days. The Caro-Kann + Slav pairing on Days 9-10 is the path."))
+    if _p["avg_loss_len"] and _p["avg_loss_len"] < 30 and _p["avg_clock_min"] > 8:
+        _diag.append(("Early-middlegame tactics", "Average loss is move " + str(_p["avg_loss_len"]) + " with " + str(_p["avg_clock_min"]) + " minutes still on the clock. You are NOT losing on time - you are hanging pieces. Run CCT (Day 2) every move from move 10 to move 25."))
+    if _p["loss_modes"].get("checkmated", 0) >= 4:
+        _diag.append(("King safety", str(_p["loss_modes"]["checkmated"]) + " games ended in checkmate. After castling, never push pawns in front of your king without a specific reason."))
+    if _p["loss_modes"].get("abandoned", 0) >= 3:
+        _diag.append(("Tilt control", str(_p["loss_modes"]["abandoned"]) + " games abandoned. Hard rule: after a loss, walk away for 5 minutes before queuing again."))
+    if not _diag:
+        _diag.append(("Holding steady", "No strong negative pattern this window. Keep volume up and follow the curriculum."))
+    for _t, _bdy in _diag:
+        st.warning("**" + _t + "** - " + _bdy)
+
+    st.markdown("### How you have been losing (last 2 months)")
+    _total_losses = sum(_p["loss_modes"].values()) or 1
+    _modes = _p["loss_modes"].most_common(4)
+    if _modes:
+        _lm_cols = st.columns(len(_modes))
+        for _i in range(len(_modes)):
+            _mode, _n = _modes[_i]
+            with _lm_cols[_i]:
+                stat_card(_mode, _n, str(_n*100//_total_losses) + "% of losses", "#c9302c")
+
+    st.markdown("### Three patterns to recognise on the board")
+    st.caption("Red = the mistake. Green = what to play instead.")
+    for _pat in _PATTERN_LIST:
+        _patterns_render_pattern(_pat)
+
